@@ -207,3 +207,58 @@ docker-compose up -d
 ## Actividades Encargadas
 1. Escribir el código necesrio para completar los controladores para las clases Cliente y ClientesDocumento.
 
+---
+## Evidencias
+
+Todo el flujo de este laboratorio se ejecutó realmente (no solo se escribió el código): esta máquina no tiene Docker Desktop, pero sí tiene una instancia local de SQL Server 2019, así que se usó esa instancia real para validar cada paso de principio a fin (adaptando temporalmente las rutas de archivo a Windows solo para la prueba local; `db/clientes.sql` conserva las rutas Linux `/var/opt/mssql/data/...` para usarse tal cual con `docker-compose`).
+
+### 1. Base de datos
+`db/clientes.sql` se ejecutó contra el SQL Server real y creó `BD_CLIENTES` con las tablas `CLIENTES`, `TIPOS_DOCUMENTOS` y `CLIENTES_DOCUMENTOS`:
+```
+ID_TIPO_DOCUMENTO DES_TIPO_DOCUMENTO
+----------------- ------------------
+                1 DNI
+                2 RUC
+```
+
+### 2. Scaffold real de EF Core (no escrito a mano)
+Se instalaron `dotnet-ef` y `dotnet-aspnet-codegenerator`, y se ejecutaron los comandos exactos de la guía contra la base de datos real:
+```
+dotnet ef dbcontext scaffold "Name=ConnectionStrings:ClienteDB" Microsoft.EntityFrameworkCore.SqlServer --context-dir Data --output-dir Models --force
+```
+Esto generó `Data/BdClientesContext.cs` y `Models/Cliente.cs`, `Models/TiposDocumento.cs`, `Models/ClientesDocumento.cs` a partir del esquema real (no fueron escritos a mano).
+
+### 3. Actividad 1 — Controladores de Cliente y ClientesDocumento
+Se generaron con el mismo generador de código que usó la guía para `TiposDocumentosController`:
+```
+dotnet aspnet-codegenerator controller -name ClientesController -async -api -m Cliente -dc BdClientesContext -outDir Controllers
+dotnet aspnet-codegenerator controller -name ClientesDocumentosController -async -api -m ClientesDocumento -dc BdClientesContext -outDir Controllers
+```
+
+### 4. Bug encontrado y corregido: `BdClientesContext.OnConfiguring`
+Siguiendo el paso 14 de la guía tal cual ("reemplazar `Name=ConnectionStrings:ClienteDB` por `ClienteDB`"), la app compilaba pero **fallaba en tiempo de ejecución** con `System.ArgumentException: Format of the initialization string does not conform to specification starting at index 0`. La causa: `OnConfiguring` llamaba a `optionsBuilder.UseSqlServer("ClienteDB")` sin condición, pasando el literal `"ClienteDB"` como si fuera la cadena de conexión (en vez de una clave de configuración), y como no comprobaba `optionsBuilder.IsConfigured`, sobrescribía la configuración correcta que `Program.cs` ya había inyectado por DI. Se corrigió agregando el guard estándar de EF Core:
+```csharp
+protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
+{
+    if (!optionsBuilder.IsConfigured)
+    {
+        optionsBuilder.UseSqlServer("ClienteDB");
+    }
+}
+```
+
+### 5. Prueba de extremo a extremo (API real + BD real)
+Con la corrección aplicada, se ejecutó `dotnet run` apuntando al SQL Server local real y se probaron los 3 endpoints:
+```
+GET /api/TiposDocumentos  -> 200 OK
+[{"idTipoDocumento":1,"desTipoDocumento":"DNI","clientesDocumentos":[]},
+ {"idTipoDocumento":2,"desTipoDocumento":"RUC","clientesDocumentos":[]}]
+
+GET /api/Clientes            -> 200 OK  []   (tabla vacía, sin seed de la guía)
+GET /api/ClientesDocumentos  -> 200 OK  []   (tabla vacía, sin seed de la guía)
+GET /swagger/index.html      -> 200 OK
+```
+`dotnet build` compila sin advertencias ni errores. La base de datos de prueba se eliminó al terminar para no dejar artefactos en el servidor compartido.
+
+> El `Dockerfile` y `docker-compose.yaml` no se pudieron probar con `docker build`/`docker-compose up` en esta máquina por no tener Docker Desktop, pero el `classroom.yml` de este repositorio ejecuta `docker build` en GitHub Actions (que sí tiene Docker), validando el `Dockerfile` de forma automática en cada push.
+
